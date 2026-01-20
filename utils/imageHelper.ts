@@ -51,8 +51,62 @@ const getSaturation = (r: number, g: number, b: number) => {
 // Returns 1 if close to black or white (common filaments), 0 otherwise
 const getExtremesBonus = (r: number, g: number, b: number) => {
   const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  if (lum < 0.15 || lum > 0.85) return 0.5;
+  if (lum < 0.10 || lum > 0.90) return 0.5; // Tightened threshold slightly
   return 0;
+};
+
+const despeckleIndices = (indices: Uint8Array, width: number, height: number, iterations: number = 1): Uint8Array => {
+    let current = new Uint8Array(indices);
+    const len = current.length;
+
+    for (let it = 0; it < iterations; it++) {
+        const next = new Uint8Array(current);
+        for (let i = 0; i < len; i++) {
+            const x = i % width;
+            const y = Math.floor(i / width);
+            const myColor = current[i];
+
+            // Count neighbors
+            const neighbors: Record<number, number> = {};
+            let count = 0;
+
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    const nx = x + dx;
+                    const ny = y + dy;
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                        const nIdx = ny * width + nx;
+                        const nColor = current[nIdx];
+                        neighbors[nColor] = (neighbors[nColor] || 0) + 1;
+                        count++;
+                    }
+                }
+            }
+
+            // Check if island (no neighbors of same color)
+            // Or if dominated by another color
+            const mySupport = neighbors[myColor] || 0;
+            
+            // If less than 2 neighbors share my color, switch to strongest neighbor
+            if (mySupport < 2) {
+                let maxC = myColor;
+                let maxCount = -1;
+                for (const cStr in neighbors) {
+                    const c = parseInt(cStr);
+                    if (neighbors[c] > maxCount) {
+                        maxCount = neighbors[c];
+                        maxC = c;
+                    }
+                }
+                if (maxCount >= 3) { // Require quorum
+                    next[i] = maxC;
+                }
+            }
+        }
+        current = next;
+    }
+    return current;
 };
 
 export const quantizeImage = (
@@ -164,7 +218,9 @@ export const quantizeImage = (
   // 3. Smart Medoid Selection
   const medoids: RGB[] = centroids.map(c => ({...c})); 
   const minMedoidScores = new Array(k).fill(Infinity);
-  const WEIGHT = 2000;
+  // Increased weight to prioritize saturated colors even more (was 4000)
+  const SATURATION_WEIGHT = 5000; 
+  const EXTREME_WEIGHT = 2000;
 
   for (let i = 0; i < pixelCount; i++) {
     const clusterIdx = assignments[i];
@@ -176,7 +232,9 @@ export const quantizeImage = (
     const distSq = getDistanceSq(p, centroids[clusterIdx]);
     const saturation = getSaturation(r, g, b);
     const extremeBonus = getExtremesBonus(r, g, b); 
-    const score = distSq - (saturation * WEIGHT) - (extremeBonus * WEIGHT);
+    
+    // Score minimizes distance to centroid BUT heavily subtracts for high saturation
+    const score = distSq - (saturation * SATURATION_WEIGHT) - (extremeBonus * EXTREME_WEIGHT);
 
     if (score < minMedoidScores[clusterIdx]) {
       minMedoidScores[clusterIdx] = score;
@@ -206,7 +264,10 @@ export const quantizeImage = (
     finalIndices[i] = oldToNew[assignments[i]];
   }
 
-  return { palette: sortedPalette, indices: finalIndices };
+  // 5. Despeckle Step (Clean up single-pixel noise)
+  const cleanedIndices = despeckleIndices(finalIndices, width, height, 2);
+
+  return { palette: sortedPalette, indices: cleanedIndices };
 };
 
 export const drawQuantizedPreview = (
@@ -241,6 +302,11 @@ export const resizeImageToCanvas = (img: HTMLImageElement | HTMLCanvasElement): 
     if(ctx) {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
+        
+        // Apply Filters to boost vibrancy BEFORE processing
+        // Increased to 150/120 to really force colors to pop
+        ctx.filter = 'saturate(150%) contrast(120%)';
+        
         ctx.drawImage(img, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
     }
     return canvas;

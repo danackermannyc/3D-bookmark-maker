@@ -503,16 +503,20 @@ export default function App() {
                 <div className="mt-6 pt-5 border-t border-slate-100">
                     <div className="flex items-center justify-between mb-3">
                         <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Updates</span>
-                        <span className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">v1.2.1</span>
+                        <span className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">v1.3.0</span>
                     </div>
                     <ul className="space-y-2 text-xs text-slate-500">
                         <li className="flex gap-2">
                             <span className="text-emerald-500 shrink-0">•</span>
-                            <span><strong>Flat Mode Fixed:</strong> Now ensures 100% uniform top surface height.</span>
+                            <span><strong>High Res Engine:</strong> Resolution increased by 60% (8px/mm).</span>
                         </li>
-                         <li className="flex gap-2">
+                        <li className="flex gap-2">
                             <span className="text-emerald-500 shrink-0">•</span>
-                            <span><strong>Smart 3MF:</strong> Added thumbnails & auto-color assignment for Bambu Studio.</span>
+                            <span><strong>Vibrancy Boost:</strong> Enhanced color separation and noise reduction.</span>
+                        </li>
+                        <li className="flex gap-2">
+                            <span className="text-emerald-500 shrink-0">•</span>
+                            <span><strong>Smart 3MF:</strong> Added thumbnails & auto-color assignment.</span>
                         </li>
                     </ul>
                 </div>

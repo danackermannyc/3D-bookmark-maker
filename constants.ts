@@ -4,8 +4,9 @@ export const BOOKMARK_HEIGHT_MM = 160;
 export const ASPECT_RATIO = BOOKMARK_WIDTH_MM / BOOKMARK_HEIGHT_MM;
 
 // Processing resolution (pixels). Higher = finer detail but larger STLs.
-// 50mm * 5 px/mm = 250px width.
-export const RES_PPM = 5; // Pixels per MM
+// 50mm * 8 px/mm = 400px width.
+// Increased from 5 to 8 to reduce pixelation.
+export const RES_PPM = 8; // Pixels per MM
 export const CANVAS_WIDTH = BOOKMARK_WIDTH_MM * RES_PPM; 
 export const CANVAS_HEIGHT = BOOKMARK_HEIGHT_MM * RES_PPM;
 
