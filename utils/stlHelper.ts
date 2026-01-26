@@ -1,3 +1,4 @@
+import JSZip from 'jszip';
 import { BookmarkSettings, RGB } from '../types';
 import { CANVAS_WIDTH, CANVAS_HEIGHT, BOOKMARK_WIDTH_MM, BOOKMARK_HEIGHT_MM } from '../constants';
 
@@ -8,21 +9,23 @@ interface MeshData {
   triangles: number[]; // Flat array of indices [v1,v2,v3...]
 }
 
-// Simplified MeshBuilder that doesn't deduplicate vertices to save memory
-// at high resolutions.
 class MeshBuilder {
   private vertices: number[] = [];
   private triangles: number[] = [];
-  // REMOVED vertexMap to prevent OOM/Corruption at high res
+  private vertexMap = new Map<string, number>();
 
   addVertex(x: number, y: number, z: number): number {
+    const key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
+    const existing = this.vertexMap.get(key);
+    if (existing !== undefined) return existing;
+
     const index = this.vertices.length / 3;
     this.vertices.push(x, y, z);
+    this.vertexMap.set(key, index);
     return index;
   }
 
   addBox(x: number, y: number, z: number, w: number, h: number, d: number) {
-    // 8 vertices
     const v0 = this.addVertex(x, y, z);
     const v1 = this.addVertex(x + w, y, z);
     const v2 = this.addVertex(x + w, y + h, z);
@@ -154,13 +157,12 @@ const get3DModelXML = (
   let objectsXML = '';
   for (const mesh of meshes) {
     let verticesXML = '';
-    // Optimized loop for vertices
     for (let i = 0; i < mesh.data.vertices.length; i += 3) {
       verticesXML += `<vertex x="${mesh.data.vertices[i].toFixed(4)}" y="${mesh.data.vertices[i+1].toFixed(4)}" z="${mesh.data.vertices[i+2].toFixed(4)}" />`;
     }
     let trianglesXML = '';
-    // Optimized loop for triangles
     for (let i = 0; i < mesh.data.triangles.length; i += 3) {
+      // Assign specific material index to each triangle
       trianglesXML += `<triangle v1="${mesh.data.triangles[i]}" v2="${mesh.data.triangles[i+1]}" v3="${mesh.data.triangles[i+2]}" p1="${mesh.paletteIdx}" />`;
     }
 
@@ -243,7 +245,7 @@ export const generate3MF = async (
     }
   }
 
-  const zip = new window.JSZip();
+  const zip = new JSZip();
   zip.file('[Content_Types].xml', getContentTypesXML());
   zip.folder('_rels')?.file('.rels', getRelsXML());
   zip.folder('3D')?.file('3dmodel.model', get3DModelXML(meshObjects, palette));
