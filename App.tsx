@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Cropper from 'react-easy-crop';
+import JSZip from 'jszip';
 import { Upload, Download, Settings, Layers, Image as ImageIcon, Loader2, Crop as CropIcon, Check, RefreshCw, Printer, Coffee } from 'lucide-react';
 import { quantizeImage, resizeImageToCanvas, drawQuantizedPreview, getCroppedImg, smoothIndices } from './utils/imageHelper';
 import { generate3MF, generateSTLs } from './utils/stlHelper';
@@ -138,7 +139,7 @@ export default function App() {
             if (!settings.isTactile) effectiveSettings.layerHeights = [0.2, 0.2, 0.2, 0.2];
             const stlBuffers = await generateSTLs(quantizedData.indices, effectiveSettings);
             setProcessing({ status: 'zipping', message: 'Zipping STLs...' });
-            const zip = new window.JSZip();
+            const zip = new JSZip();
             Object.keys(stlBuffers).forEach(filename => { zip.file(filename, stlBuffers[filename]); });
             const blob = await zip.generateAsync({ type: 'blob' });
             const url = URL.createObjectURL(blob);
