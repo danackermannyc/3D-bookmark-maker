@@ -1,16 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Cropper from 'react-easy-crop';
 import { Upload, Download, Settings, Layers, Image as ImageIcon, Loader2, Crop as CropIcon, Check, RefreshCw, Printer, Coffee } from 'lucide-react';
-import { quantizeImage, resizeImageToCanvas, drawQuantizedPreview, getCroppedImg } from './utils/imageHelper';
+import { quantizeImage, resizeImageToCanvas, drawQuantizedPreview, getCroppedImg, smoothIndices } from './utils/imageHelper';
 import { generate3MF, generateSTLs } from './utils/stlHelper';
 import { BookmarkSettings, ProcessingState, RGB } from './types';
-import { DEFAULT_PALETTE, ASPECT_RATIO, CANVAS_WIDTH, CANVAS_HEIGHT } from './constants';
+import { CANVAS_WIDTH, CANVAS_HEIGHT } from './constants';
 
 export default function App() {
   // State
-  const [rawImgSrc, setRawImgSrc] = useState<string | null>(null); // Before crop
-  const [imgSrc, setImgSrc] = useState<string | null>(null); // Final cropped
-  const [quantizedData, setQuantizedData] = useState<{ palette: RGB[], indices: Uint8Array } | null>(null);
+  const [rawImgSrc, setRawImgSrc] = useState<string | null>(null);
+  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [quantizedData, setQuantizedData] = useState<{ palette: RGB[], indices: Uint8Array, rawIndices: Uint8Array } | null>(null);
   
   // Cropper State
   const [crop, setCrop] = useState({ x: 0, y: 0 });
@@ -20,9 +20,10 @@ export default function App() {
   const [settings, setSettings] = useState<BookmarkSettings>({
     baseHeight: 0.8,
     layerHeights: [0.6, 0.8, 1.0, 1.2],
-    isTactile: true,
+    isTactile: false, // Default to Flat
     widthMm: 50,
-    heightMm: 160
+    heightMm: 160,
+    smoothing: 2
   });
 
   const [processing, setProcessing] = useState<ProcessingState>({ status: 'idle' });
@@ -40,13 +41,12 @@ export default function App() {
       reader.onload = (event) => {
         if (event.target?.result) {
           setRawImgSrc(event.target.result as string);
-          setImgSrc(null); // Final cropped
+          setImgSrc(null);
           setQuantizedData(null);
         }
       };
       reader.readAsDataURL(file);
     }
-    // Reset input value to allow re-uploading same file
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -60,7 +60,7 @@ export default function App() {
       try {
         const croppedImage = await getCroppedImg(rawImgSrc, croppedAreaPixels);
         setImgSrc(croppedImage);
-        setRawImgSrc(null); // Hide cropper
+        setRawImgSrc(null);
         setProcessing({ status: 'idle' });
       } catch (e) {
         console.error(e);
@@ -76,39 +76,30 @@ export default function App() {
     setProcessing({ status: 'idle' });
   };
 
-  const toggleMode = (tactile: boolean) => {
-      setSettings(prev => {
-          const newSettings = { ...prev, isTactile: tactile };
-          if (!tactile) {
-              // Switch to Flat: Set all to 0.6mm (3 layers) for solid opacity and uniform flatness
-              newSettings.layerHeights = [0.6, 0.6, 0.6, 0.6];
-          } else {
-              // Switch to Tactile: Restore default stepped heights
-              newSettings.layerHeights = [0.6, 0.8, 1.0, 1.2];
-          }
-          return newSettings;
-      });
-  };
-
   // Process image when final source changes
   useEffect(() => {
     if (!imgSrc) return;
-    
     const img = new Image();
     img.onload = () => {
-        // Resize handled by getCroppedImg or just double check
         const canvas = resizeImageToCanvas(img);
         const ctx = canvas.getContext('2d');
         if(!ctx) return;
-
-        // Quantize
         const result = quantizeImage(ctx, 4);
-        setQuantizedData(result);
+        // Store raw indices so we can re-apply smoothing without re-quantizing
+        setQuantizedData({ ...result, rawIndices: result.indices });
     };
     img.src = imgSrc;
   }, [imgSrc]);
 
-  // Redraw preview when quantization data changes
+  // Apply/Re-apply smoothing when settings or data change
+  useEffect(() => {
+    if (quantizedData?.rawIndices) {
+        const smoothed = smoothIndices(quantizedData.rawIndices, CANVAS_WIDTH, CANVAS_HEIGHT, settings.smoothing);
+        setQuantizedData(prev => prev ? ({ ...prev, indices: smoothed }) : null);
+    }
+  }, [settings.smoothing]);
+
+  // Redraw preview
   useEffect(() => {
     if (quantizedData && canvasRef.current) {
         drawQuantizedPreview(canvasRef.current, quantizedData.indices, quantizedData.palette);
@@ -119,32 +110,18 @@ export default function App() {
   const handleDownload3MF = async () => {
     if (!quantizedData || !imgSrc) return;
     setProcessing({ status: 'generating_stl', message: 'Generating 3MF...' });
-    
-    // Use a timeout to allow UI to update
     setTimeout(async () => {
         try {
             const effectiveSettings = { ...settings };
-            // Ensure absolute uniformity in Flat mode based on current slider setting
-            if (!settings.isTactile) {
-                const h = settings.layerHeights[0];
-                effectiveSettings.layerHeights = [h, h, h, h];
-            }
-
-            // Generate 3MF Blob
-            // Pass the preview canvas as thumbnail source
+            if (!settings.isTactile) effectiveSettings.layerHeights = [0.2, 0.2, 0.2, 0.2];
             const thumbnailData = canvasRef.current?.toDataURL('image/png') || imgSrc;
             const blob = await generate3MF(quantizedData.indices, effectiveSettings, quantizedData.palette, thumbnailData);
-            
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
-            a.download = 'bambu_bookmark_project.3mf';
-            a.click();
+            a.href = url; a.download = 'bambu_bookmark_project.3mf'; a.click();
             URL.revokeObjectURL(url);
-            
             setProcessing({ status: 'done', message: 'Download ready!' });
             setTimeout(() => setProcessing({ status: 'idle' }), 3000);
-            
         } catch (e) {
             console.error(e);
             setProcessing({ status: 'error', message: 'Generation failed.' });
@@ -155,33 +132,19 @@ export default function App() {
   const handleDownloadSTL = async () => {
     if (!quantizedData) return;
     setProcessing({ status: 'generating_stl', message: 'Generating STLs...' });
-
     setTimeout(async () => {
         try {
             const effectiveSettings = { ...settings };
-            if (!settings.isTactile) {
-                 const h = settings.layerHeights[0];
-                 effectiveSettings.layerHeights = [h, h, h, h];
-            }
-
+            if (!settings.isTactile) effectiveSettings.layerHeights = [0.2, 0.2, 0.2, 0.2];
             const stlBuffers = await generateSTLs(quantizedData.indices, effectiveSettings);
-            
             setProcessing({ status: 'zipping', message: 'Zipping STLs...' });
-
             const zip = new window.JSZip();
-            Object.keys(stlBuffers).forEach(filename => {
-                zip.file(filename, stlBuffers[filename]);
-            });
-
+            Object.keys(stlBuffers).forEach(filename => { zip.file(filename, stlBuffers[filename]); });
             const blob = await zip.generateAsync({ type: 'blob' });
-            
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
-            a.download = 'bookmark_stls.zip';
-            a.click();
+            a.href = url; a.download = 'bookmark_stls.zip'; a.click();
             URL.revokeObjectURL(url);
-
             setProcessing({ status: 'done', message: 'Download ready!' });
             setTimeout(() => setProcessing({ status: 'idle' }), 3000);
         } catch (e) {
@@ -203,16 +166,15 @@ export default function App() {
       {/* Header */}
       <header className="max-w-4xl w-full flex items-center justify-between mb-8">
         <div className="flex items-center gap-3">
-            <div className="bg-emerald-600 p-2 rounded-lg text-white">
+            <div className="bg-emerald-600 p-2 rounded-lg text-white shadow-md">
                 <Layers size={28} />
             </div>
             <div>
-                <h1 className="text-2xl font-bold tracking-tight text-slate-900">Multi-Color 3D Bookmark Creator</h1>
-                <p className="text-slate-500 text-sm">Convert images to 4-color printable files</p>
+                <h1 className="text-2xl font-bold tracking-tight text-slate-900">3D Bookmark Creator</h1>
+                <p className="text-slate-500 text-sm">Convert images to bold 4-color printable files</p>
             </div>
         </div>
         
-        {/* Only show upload input via handler, no button here if empty. If image loaded, show Restart */}
         {imgSrc && (
             <button 
                 onClick={handleReset}
@@ -221,13 +183,12 @@ export default function App() {
                 <RefreshCw size={16} /> New Project
             </button>
         )}
-        {/* Hidden Input */}
         <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" className="hidden" />
       </header>
 
       {/* Cropper Modal Overlay */}
       {rawImgSrc && (
-          <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4 backdrop-blur-sm">
               <div className="relative w-full max-w-2xl h-[60vh] bg-slate-900 rounded-xl overflow-hidden shadow-2xl">
                   <Cropper
                     image={rawImgSrc}
@@ -239,25 +200,22 @@ export default function App() {
                     onZoomChange={setZoom}
                   />
               </div>
-              <div className="mt-6 flex gap-4 bg-white p-4 rounded-xl shadow-lg">
-                  <div className="flex flex-col">
-                      <label className="text-xs font-semibold text-slate-500 uppercase">Zoom</label>
+              <div className="mt-6 flex gap-4 bg-white p-6 rounded-2xl shadow-2xl items-end">
+                  <div className="flex flex-col gap-2">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Crop Zoom</label>
                       <input
                         type="range"
                         value={zoom}
-                        min={1}
-                        max={3}
-                        step={0.1}
-                        aria-labelledby="Zoom"
+                        min={1} max={3} step={0.1}
                         onChange={(e) => setZoom(Number(e.target.value))}
                         className="w-48 accent-emerald-600"
                       />
                   </div>
                   <button 
                     onClick={handleCropConfirm}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2 rounded-lg font-bold flex items-center gap-2"
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-xl font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95"
                   >
-                      <Check size={20} /> Crop & Continue
+                      <Check size={20} /> Use This Area
                   </button>
               </div>
           </div>
@@ -268,63 +226,62 @@ export default function App() {
         {/* Left Column: Editor & Preview */}
         <div className="lg:col-span-7 flex flex-col gap-6">
             
-            {/* Upload / Start Section */}
+            {/* Start Section */}
             {!imgSrc && !rawImgSrc && (
-                <div 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="bg-white p-8 rounded-xl shadow-sm border-2 border-dashed border-slate-300 text-center flex flex-col items-center justify-center gap-4 min-h-[400px] hover:border-emerald-500 hover:bg-slate-50 transition-all cursor-pointer group"
-                >
-                    <div className="bg-slate-100 group-hover:bg-emerald-100 p-6 rounded-full mb-2 transition-colors">
-                        <Upload className="text-slate-400 group-hover:text-emerald-600" size={48} />
+                <div className="flex flex-col gap-6">
+                    <div 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="bg-white p-12 rounded-2xl shadow-sm border-2 border-dashed border-slate-200 text-center flex flex-col items-center justify-center gap-4 min-h-[300px] hover:border-emerald-500 hover:bg-emerald-50/50 transition-all cursor-pointer group"
+                    >
+                        <div className="bg-slate-100 group-hover:bg-emerald-100 p-6 rounded-full transition-colors">
+                            <Upload className="text-slate-400 group-hover:text-emerald-600" size={40} />
+                        </div>
+                        <div>
+                            <h2 className="text-xl font-bold text-slate-700 group-hover:text-emerald-700">Upload Image</h2>
+                            <p className="text-slate-500 max-w-sm mt-2 text-sm leading-relaxed">
+                                Use your own photos or graphics. Clear, high-contrast images work best.
+                            </p>
+                        </div>
                     </div>
-                    <div>
-                        <h2 className="text-xl font-semibold text-slate-700 group-hover:text-emerald-700">Upload an Image</h2>
-                        <p className="text-slate-500 max-w-sm mt-2">
-                            Select a JPG or PNG. High contrast images with distinct colors work best.
-                        </p>
-                    </div>
-                    <button className="bg-emerald-600 text-white px-6 py-2 rounded-lg font-bold shadow-sm mt-4 group-hover:bg-emerald-700 transition-colors">
-                        Choose File
-                    </button>
                 </div>
             )}
 
             {/* Canvas Preview */}
             {imgSrc && (
-                <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col items-center">
-                    <div className="flex justify-between w-full mb-4 items-center">
-                         <h3 className="font-semibold flex items-center gap-2"><ImageIcon size={18} /> Preview</h3>
-                         <div className="flex gap-2">
-                            <button onClick={() => { setRawImgSrc(imgSrc); setImgSrc(null); }} className="text-xs text-emerald-600 hover:underline flex items-center gap-1">
-                                <CropIcon size={12} /> Re-crop
+                <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center">
+                    <div className="flex justify-between w-full mb-6 items-center">
+                         <h3 className="font-bold text-xl flex items-center gap-2 text-slate-800"><ImageIcon size={22} className="text-emerald-500" /> Preview</h3>
+                         <div className="flex gap-4">
+                            <button onClick={() => { setRawImgSrc(imgSrc); setImgSrc(null); }} className="text-xs font-bold text-emerald-600 hover:bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-100 flex items-center gap-1 transition-all">
+                                <CropIcon size={14} /> Adjust Crop
                             </button>
-                            <span className="text-xs font-mono text-slate-400">50mm x 160mm</span>
+                            <span className="text-xs font-mono font-bold bg-slate-100 px-2 py-1.5 rounded-lg text-slate-500 tracking-tight">50mm x 160mm</span>
                          </div>
                     </div>
                    
-                    <div className="relative shadow-inner bg-slate-100 rounded-lg overflow-hidden border border-slate-200">
-                         {/* Actual Canvas */}
+                    <div className="relative shadow-2xl bg-slate-900 p-2 rounded-2xl overflow-hidden border-4 border-slate-800">
                          <canvas 
                             ref={canvasRef} 
                             width={CANVAS_WIDTH} 
                             height={CANVAS_HEIGHT} 
-                            className="w-[150px] h-[480px] object-contain"
+                            className="w-[180px] h-[576px] object-contain block"
+                            style={{ imageRendering: 'pixelated' }}
                          />
                     </div>
                     
                     {quantizedData && (
-                        <div className="flex gap-4 mt-6">
+                        <div className="flex gap-6 mt-8 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                             {quantizedData.palette.map((c, i) => (
-                                <div key={i} className="flex flex-col items-center gap-1">
+                                <div key={i} className="flex flex-col items-center gap-2">
                                     <div 
-                                        className="w-10 h-10 rounded-full border border-slate-200 shadow-sm relative"
+                                        className="w-12 h-12 rounded-2xl border-2 border-white shadow-lg relative transform hover:scale-110 transition-transform cursor-pointer"
                                         style={{ backgroundColor: `rgb(${c.r},${c.g},${c.b})` }}
                                     >
                                         {i === 0 && (
-                                            <div className="absolute -top-2 -right-2 bg-slate-800 text-white text-[10px] px-1 rounded">Base</div>
+                                            <div className="absolute -top-3 -right-3 bg-slate-900 text-white text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider shadow-md">Base</div>
                                         )}
                                     </div>
-                                    <span className="text-xs text-slate-500 font-medium">Col {i+1}</span>
+                                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Slot {i+1}</span>
                                 </div>
                             ))}
                         </div>
@@ -332,38 +289,38 @@ export default function App() {
                 </div>
             )}
 
-            {/* Printing Instructions */}
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <h3 className="font-semibold text-lg mb-4 flex items-center gap-2 text-slate-800">
-                    <Printer className="text-emerald-600" size={20} />
+            {/* Detailed Printing Instructions */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <h3 className="font-bold text-lg mb-6 flex items-center gap-2 text-slate-800">
+                    <Printer className="text-emerald-600" size={24} />
                     How to print with Bambu AMS
                 </h3>
-                <ul className="space-y-4">
-                    <li className="flex gap-3 text-sm text-slate-600">
-                        <span className="bg-slate-100 text-slate-600 font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5">1</span>
+                <ul className="space-y-5">
+                    <li className="flex gap-4 text-sm text-slate-600">
+                        <span className="bg-slate-100 text-slate-600 font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5 border border-slate-200">1</span>
                         <span>
-                            <strong className="text-slate-800 block mb-1">Download your design</strong>
+                            <strong className="text-slate-900 block mb-1">Download your design</strong>
                             Export either the 3MF file (recommended) or the Stacked STLs (for manual control) directly from the app.
                         </span>
                     </li>
-                    <li className="flex gap-3 text-sm text-slate-600">
-                        <span className="bg-slate-100 text-slate-600 font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5">2</span>
+                    <li className="flex gap-4 text-sm text-slate-600">
+                        <span className="bg-slate-100 text-slate-600 font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5 border border-slate-200">2</span>
                         <span>
-                             <strong className="text-slate-800 block mb-1">Import into Bambu Studio</strong>
+                             <strong className="text-slate-900 block mb-1">Import into Bambu Studio</strong>
                              Drag your file(s) onto the build plate. If the slicer asks to "Load as a single object with multiple parts," always select <strong className="text-emerald-700">YES</strong> to ensure the layers stay perfectly aligned.
                         </span>
                     </li>
-                    <li className="flex gap-3 text-sm text-slate-600">
-                        <span className="bg-slate-100 text-slate-600 font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5">3</span>
+                    <li className="flex gap-4 text-sm text-slate-600">
+                        <span className="bg-slate-100 text-slate-600 font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5 border border-slate-200">3</span>
                         <span>
-                             <strong className="text-slate-800 block mb-1">Locate the Parts</strong>
-                             Switch to the <em>Objects</em> tab in the left-hand sidebar to see each color layer and the base plate listed as distinct components. <strong className="text-emerald-700">Note: Your object will likely appear monochrome until you assign AMS colors to the four individual objects!</strong>
+                             <strong className="text-slate-900 block mb-1">Locate the Parts</strong>
+                             Switch to the <em>Objects</em> tab in the left-hand sidebar to see each color layer and the base plate listed as distinct components. <strong className="text-emerald-600 font-bold">Note: Your object will likely appear monochrome until you assign AMS colors to the four individual objects!</strong>
                         </span>
                     </li>
-                     <li className="flex gap-3 text-sm text-slate-600">
-                        <span className="bg-slate-100 text-slate-600 font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5">4</span>
+                     <li className="flex gap-4 text-sm text-slate-600">
+                        <span className="bg-slate-100 text-slate-600 font-bold w-7 h-7 flex items-center justify-center rounded-full shrink-0 text-xs mt-0.5 border border-slate-200">4</span>
                         <span>
-                             <strong className="text-slate-800 block mb-1">Assign AMS Colors</strong>
+                             <strong className="text-slate-900 block mb-1">Assign AMS Colors</strong>
                              Select a layer from the list and press the number on your keyboard (1, 2, 3, or 4) that matches the filament slot in your AMS.
                         </span>
                     </li>
@@ -375,29 +332,46 @@ export default function App() {
         <div className="lg:col-span-5 flex flex-col gap-6">
              
              {/* 3D Configuration */}
-             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                 <div className="flex items-center gap-2 mb-6 border-b border-slate-100 pb-4">
                     <Settings className="text-emerald-600" size={20} />
-                    <h2 className="font-semibold text-lg">3D Configuration</h2>
+                    <h2 className="font-bold text-lg">3D Configuration</h2>
                 </div>
 
-                <div className="space-y-6">
+                <div className="space-y-8">
                     
+                    {/* Smoothing Slider */}
+                    <div>
+                         <div className="flex justify-between mb-2">
+                             <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                                Style Boldness
+                             </label>
+                             <span className="text-xs font-bold text-emerald-600">{settings.smoothing === 0 ? 'More Detailed' : settings.smoothing === 5 ? 'Bolder' : 'Balanced'}</span>
+                         </div>
+                         <input 
+                            type="range" min="0" max="5" step="1"
+                            value={settings.smoothing}
+                            onChange={(e) => setSettings(s => ({...s, smoothing: parseInt(e.target.value)}))}
+                            className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                         />
+                         <p className="text-[10px] text-slate-400 mt-2 font-medium">Higher smoothness merges small pixels into larger, cleaner blocks of color.</p>
+                    </div>
+
                     {/* Mode Toggle */}
-                    <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">Mode</span>
-                        <div className="flex bg-slate-100 p-1 rounded-lg">
+                    <div className="flex items-center justify-between bg-slate-50 p-3 rounded-xl border border-slate-100">
+                        <span className="text-sm font-bold text-slate-600">3D Texture</span>
+                        <div className="flex bg-slate-200 p-1 rounded-lg">
                             <button 
-                                onClick={() => toggleMode(false)}
-                                className={`px-4 py-1.5 text-xs font-medium rounded-md transition-all ${!settings.isTactile ? 'bg-white shadow text-emerald-700' : 'text-slate-500'}`}
+                                onClick={() => setSettings(s => ({...s, isTactile: false}))}
+                                className={`px-4 py-1.5 text-[11px] font-black uppercase tracking-wider rounded-md transition-all ${!settings.isTactile ? 'bg-white shadow-sm text-emerald-700' : 'text-slate-500'}`}
                             >
-                                Flat Multi-color
+                                Flat
                             </button>
                             <button 
-                                onClick={() => toggleMode(true)}
-                                className={`px-4 py-1.5 text-xs font-medium rounded-md transition-all ${settings.isTactile ? 'bg-white shadow text-emerald-700' : 'text-slate-500'}`}
+                                onClick={() => setSettings(s => ({...s, isTactile: true}))}
+                                className={`px-4 py-1.5 text-[11px] font-black uppercase tracking-wider rounded-md transition-all ${settings.isTactile ? 'bg-white shadow-sm text-emerald-700' : 'text-slate-500'}`}
                             >
-                                Tactile 2.5D
+                                Tactile
                             </button>
                         </div>
                     </div>
@@ -405,138 +379,157 @@ export default function App() {
                     {/* Base Height */}
                     <div>
                          <div className="flex justify-between mb-2">
-                             <label className="text-sm font-medium text-slate-700">Base Thickness</label>
-                             <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">{settings.baseHeight}mm</span>
+                             <label className="text-sm font-bold text-slate-700">Base Plate Thickness</label>
+                             <span className="text-xs font-bold bg-slate-100 px-2 py-1 rounded-lg text-slate-600">{settings.baseHeight}mm</span>
                          </div>
                          <input 
                             type="range" min="0.2" max="2.0" step="0.2"
                             value={settings.baseHeight}
                             onChange={(e) => setSettings(s => ({...s, baseHeight: parseFloat(e.target.value)}))}
-                            className="w-full accent-emerald-600"
+                            className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                          />
                     </div>
 
                     {/* Layer Heights */}
-                    {settings.isTactile ? (
-                        <div className="space-y-3 pt-4 border-t border-slate-100">
-                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Layer Heights (Above Base)</p>
+                    {settings.isTactile && (
+                        <div className="space-y-4 pt-6 border-t border-slate-100">
+                            <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Tactile Depths (mm)</p>
                             {settings.layerHeights.map((h, i) => (
                                 <div key={i} className="flex items-center gap-4">
-                                    <div className="w-16 text-xs font-medium text-slate-500">
-                                        {i === 0 ? "Col 1 (Base)" : `Color ${i+1}`}
+                                    <div className="w-16 text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
+                                        {i === 0 ? "Slot 1 (Min)" : `Slot ${i+1}`}
                                     </div>
                                     <input 
                                         type="range" min="0.2" max="3.0" step="0.2"
                                         value={h}
                                         onChange={(e) => updateLayerHeight(i, parseFloat(e.target.value))}
-                                        className="flex-1 accent-emerald-600"
+                                        className="flex-1 h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                                     />
-                                    <span className="w-10 text-xs text-right text-slate-600">{h}mm</span>
+                                    <span className="w-12 text-xs font-bold text-right text-slate-500">{h}</span>
                                 </div>
                             ))}
-                        </div>
-                    ) : (
-                         <div className="pt-4 border-t border-slate-100">
-                             <div className="flex justify-between mb-2">
-                                 <label className="text-sm font-medium text-slate-700">Color Thickness</label>
-                                 <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600">{settings.layerHeights[0]}mm</span>
-                             </div>
-                             <input 
-                                type="range" min="0.2" max="2.0" step="0.2"
-                                value={settings.layerHeights[0]}
-                                onChange={(e) => {
-                                    const val = parseFloat(e.target.value);
-                                    setSettings(s => ({...s, layerHeights: [val, val, val, val]}));
-                                }}
-                                className="w-full accent-emerald-600"
-                             />
-                             <p className="text-[10px] text-slate-400 mt-2">
-                                Uniform thickness for a smooth, flat top surface.
-                             </p>
                         </div>
                     )}
                 </div>
              </div>
 
              {/* Action Buttons */}
-             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <div className="flex flex-col gap-3">
-                    {/* 3MF Button */}
+             <div className="bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
+                <div className="flex flex-col gap-4">
                     <button
                         onClick={handleDownload3MF}
                         disabled={!quantizedData || processing.status !== 'idle'}
-                        className={`w-full py-3 rounded-lg font-bold text-white shadow-md flex items-center justify-center gap-2 transition-all
-                            ${!quantizedData ? 'bg-slate-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 hover:shadow-lg active:scale-95'}
+                        className={`w-full py-4 rounded-2xl font-black text-white shadow-lg flex items-center justify-center gap-3 transition-all uppercase tracking-widest
+                            ${!quantizedData ? 'bg-slate-200 cursor-not-allowed text-slate-400' : 'bg-emerald-600 hover:bg-emerald-700 hover:shadow-emerald-200 hover:translate-y-[-2px] active:translate-y-[0px]'}
                         `}
                     >
                         {processing.status === 'idle' || processing.status === 'done' || processing.status === 'error' ? (
                             <>
-                                <Download size={20} /> Download 3MF Project
+                                <Download size={22} /> Download 3MF Project
                             </>
                         ) : (
                             <>
-                                <Loader2 className="animate-spin" size={20} /> {processing.message}
+                                <Loader2 className="animate-spin" size={22} /> {processing.message}
                             </>
                         )}
                     </button>
                     
-                    {/* STL Button */}
                     <button
                         onClick={handleDownloadSTL}
                         disabled={!quantizedData || processing.status !== 'idle'}
-                        className={`w-full py-3 rounded-lg font-semibold text-emerald-700 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 flex items-center justify-center gap-2 transition-all
-                             ${!quantizedData ? 'opacity-50 cursor-not-allowed' : ''}
+                        className={`w-full py-4 rounded-2xl font-black text-emerald-700 border-2 border-emerald-100 bg-emerald-50 hover:bg-emerald-100 flex items-center justify-center gap-3 transition-all uppercase tracking-widest
+                             ${!quantizedData ? 'opacity-30 cursor-not-allowed' : ''}
                         `}
                     >
-                        <Download size={18} /> Download STLs (ZIP)
+                        <Download size={20} /> STL Stack (ZIP)
                     </button>
                 </div>
                 
                 {processing.status === 'error' && (
-                    <p className="text-red-500 text-xs text-center mt-2">{processing.message}</p>
+                    <p className="text-red-500 text-[11px] font-bold text-center mt-3 bg-red-50 py-2 rounded-lg">{processing.message}</p>
                 )}
-                <p className="text-xs text-slate-400 text-center mt-3">
-                    3MF is recommended for Bambu Studio to maintain alignment.
+                <p className="text-[10px] text-slate-400 font-medium text-center mt-4">
+                    Recommended: 3MF maintains layer color assignments automatically.
                 </p>
+             </div>
 
-                {/* Version Log */}
-                <div className="mt-6 pt-5 border-t border-slate-100">
-                    <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Updates</span>
-                        <span className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">v1.3.0</span>
-                    </div>
-                    <ul className="space-y-2 text-xs text-slate-500">
-                        <li className="flex gap-2">
-                            <span className="text-emerald-500 shrink-0">•</span>
-                            <span><strong>High Res Engine:</strong> Resolution increased by 60% (8px/mm).</span>
-                        </li>
-                        <li className="flex gap-2">
-                            <span className="text-emerald-500 shrink-0">•</span>
-                            <span><strong>Vibrancy Boost:</strong> Enhanced color separation and noise reduction.</span>
-                        </li>
-                        <li className="flex gap-2">
-                            <span className="text-emerald-500 shrink-0">•</span>
-                            <span><strong>Smart 3MF:</strong> Added thumbnails & auto-color assignment.</span>
-                        </li>
-                    </ul>
-                </div>
+             {/* Updates Card */}
+             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                 <div className="flex justify-between items-center mb-4">
+                     <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Updates</span>
+                     <span className="bg-emerald-50 text-emerald-600 text-[10px] px-2 py-0.5 rounded-full font-bold">v1.3.0</span>
+                 </div>
+                 <ul className="space-y-3">
+                     <li className="flex items-start gap-2 text-xs text-slate-600">
+                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 shrink-0"></span>
+                         <span><strong className="text-slate-900">High Res Engine:</strong> Resolution increased by 60% (8px/mm).</span>
+                     </li>
+                     <li className="flex items-start gap-2 text-xs text-slate-600">
+                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 shrink-0"></span>
+                         <span><strong className="text-slate-900">Vibrancy Boost:</strong> Enhanced color separation and noise reduction.</span>
+                     </li>
+                     <li className="flex items-start gap-2 text-xs text-slate-600">
+                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 shrink-0"></span>
+                         <span><strong className="text-slate-900">Smart 3MF:</strong> Added thumbnails & auto-color assignment.</span>
+                     </li>
+                 </ul>
              </div>
 
         </div>
       </main>
 
-      {/* Tip Jar Footer */}
-      <footer className="mt-16 pb-6 flex flex-col items-center gap-3">
-        <p className="text-slate-400 text-sm">Found this useful?</p>
-        <a 
-          href="https://ko-fi.com/danackerman" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="flex items-center gap-2 bg-[#FF5E5B] text-white px-6 py-2.5 rounded-full font-medium shadow-md hover:bg-[#ff4845] hover:shadow-lg transition-all active:scale-95"
-        >
-          <Coffee size={18} fill="currentColor" className="text-white" />
-          <span>Buy me a coffee</span>
-        </a>
+      {/* Footer Area with Video & Tip Jar */}
+      <footer className="max-w-6xl w-full mt-20 mb-12 grid grid-cols-1 md:grid-cols-2 gap-12 border-t border-slate-200 pt-12">
+        
+        {/* Left: Video */}
+        <div className="flex flex-col items-start gap-6">
+            <h3 className="font-bold text-xl text-slate-800 flex items-center gap-3">
+              <div className="bg-red-600 p-1.5 rounded-lg text-white">
+                 <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+              </div>
+              See it in action
+            </h3>
+            <div className="relative rounded-2xl overflow-hidden shadow-2xl border-4 border-white bg-slate-900 w-[280px] aspect-[9/16] group">
+                <iframe 
+                    className="w-full h-full"
+                    src="https://www.youtube.com/embed/xjQbWemTaN0?rel=0" 
+                    title="YouTube video player" 
+                    frameBorder="0" 
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                    allowFullScreen
+                ></iframe>
+            </div>
+        </div>
+
+        {/* Right: Tip Jar */}
+        <div className="flex flex-col items-start md:items-end justify-center h-full gap-8">
+            <div className="text-left md:text-right space-y-3">
+               <h3 className="text-2xl font-bold text-slate-900">Printed something cool?</h3>
+               <p className="text-slate-500 max-w-md text-base leading-relaxed">
+                 This tool is completely free. If you enjoyed using it, sharing your print or buying me a coffee keeps the updates coming!
+               </p>
+            </div>
+            
+            <a 
+              href="https://ko-fi.com/danackerman" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="group flex items-center gap-4 bg-[#FF5E5B] text-white pl-8 pr-10 py-5 rounded-full font-black shadow-xl hover:bg-[#ff4845] hover:shadow-2xl hover:-translate-y-1 transition-all active:scale-95 active:translate-y-0"
+            >
+              <div className="bg-white/20 p-2 rounded-full group-hover:rotate-12 transition-transform">
+                <Coffee size={24} fill="currentColor" className="text-white" />
+              </div>
+              <div className="flex flex-col items-start">
+                  <span className="text-[10px] uppercase tracking-widest font-bold opacity-80">Support the Dev</span>
+                  <span className="text-lg leading-none">Buy me a coffee</span>
+              </div>
+            </a>
+            
+            <div className="flex gap-4 text-slate-400">
+               {/* Maybe add social links later, for now just empty or text */}
+            </div>
+        </div>
+
       </footer>
     </div>
   );
