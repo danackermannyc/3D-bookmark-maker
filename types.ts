@@ -10,16 +10,10 @@ export interface BookmarkSettings {
   isTactile: boolean;
   widthMm: number;
   heightMm: number;
+  smoothing: number; // 0 (none) to 5 (heavy)
 }
 
 export interface ProcessingState {
   status: 'idle' | 'processing' | 'generating_stl' | 'zipping' | 'done' | 'error';
   message?: string;
-}
-
-// Declaration for the global JSZip library loaded via CDN
-declare global {
-  interface Window {
-    JSZip: any;
-  }
 }
