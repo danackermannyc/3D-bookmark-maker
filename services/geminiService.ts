@@ -7,13 +7,17 @@ export const generatePattern = async (prompt: string): Promise<string> => {
 
   const ai = new GoogleGenAI({ apiKey });
   
-  const finalPrompt = `Create a vibrant, high-contrast, colorful bookmark pattern design. 
-  Style: ${prompt}. 
-  Constraints: Vertical aspect ratio (roughly 1:3). Minimalist, vector-art style, suitable for 4-color 3D printing. 
-  Colors: Use bright, saturated colors. Avoid dark backgrounds, pastels, or muted tones.
-  No gradients, clear separation of colors.`;
+  const finalPrompt = `Create a bold, high-contrast pop-art bookmark pattern. 
+  Theme/Style: ${prompt}. 
+  Visual Requirements:
+  - POP ART STYLE: Think Lichtenstein or Warhol vibes.
+  - COLOR BLOCKS: Use large, solid areas of vibrant color. No gradients.
+  - BOLD OUTLINES: Use thick, dark lines to separate shapes.
+  - MINIMALISM: Simple, powerful vector shapes. Avoid tiny details or fine textures.
+  - COMPOSITION: Vertical orientation (1:3 aspect ratio).
+  - COLORS: 4 distinct, highly saturated colors. No pastels or muddy tones.
+  - STRICTLY NO: Shadows, photographic elements, dithering, or noise.`;
 
-  // Using generateContent with gemini-2.5-flash-image for image generation
   const response = await ai.models.generateContent({
     model: MODEL_NAMES.IMAGE_GEN,
     contents: {
@@ -21,7 +25,6 @@ export const generatePattern = async (prompt: string): Promise<string> => {
     }
   });
 
-  // Extract image
   const candidates = response.candidates;
   if (candidates && candidates.length > 0) {
       const parts = candidates[0].content.parts;
